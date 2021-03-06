@@ -312,8 +312,8 @@ const op = method => {
       type: 'assymetric',
       encoding: 'hex',
       didPublicKeyEncoding: 'publicKeyHex',
-      publicKey: x25519Key.toString('hex'),
-      privateKey: x25519Key.toString('hex'),
+      publicKey: x25519Key.publicKeyBuffer.toString('hex'),
+      privateKey: x25519Key.privateKeyBuffer.toString('hex'),
       tags: ['X25519KeyAgreementKey2019', '#keyAgreement'],
       notes
     })
