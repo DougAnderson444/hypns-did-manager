@@ -1,162 +1,168 @@
-import DIDWallet from '@transmute/did-wallet'
-import * as ES256K from '@transmute/es256k-jws-ts' // https://github.com/w3c-ccg/lds-jws2020
-import jsonpatch from 'fast-json-patch'
-
-import {
-  encodeJson,
-  signEncodedPayload,
-  getDidUniqueSuffix
-} from '../func/index.js'
-
 import * as didCrypto from '../crypto/index.js'
-import MnemonicKeySystem from '../crypto/MnemonicKeySystem.js'
+import DIDWallet from 'simple-did-wallet'
 
-const op = method => {
-  const { didMethodName } = method.parameters
+const SERVICE = 'service'
+const SERVICE_INDEX = 0
 
-  const getDidDocumentModel = (primaryPublicKey, recoveryPublicKey) => ({
-    '@context': 'https://w3id.org/did/v1',
-    publicKey: [
-      {
-        id: '#primary',
-        usage: 'signing',
-        type: 'Secp256k1VerificationKey2018',
-        publicKeyHex: primaryPublicKey
-      },
-      {
-        id: '#recovery',
-        usage: 'recovery',
-        type: 'Secp256k1VerificationKey2018',
-        publicKeyHex: recoveryPublicKey
-      }
-    ]
-  })
+function bufferToHex (buffer) {
+  return [...new Uint8Array(buffer)]
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('')
+}
+export default (manager) => {
+  // const { didMethodName } = manager.parameters
 
-  const makeSignedOperation = async (header, payload, privateKey) => {
-    const encodedHeader = encodeJson(header)
-    const encodedPayload = encodeJson(payload)
-    const signature = await signEncodedPayload(
-      encodedHeader,
-      encodedPayload,
-      privateKey
-    )
-    const operation = {
-      protected: encodedHeader,
-      payload: encodedPayload,
-      signature
+  const getDidDoc = async (deviceName) => {
+    const seed = await manager.hypnsNode.getDeviceSeed(deviceName) // uint8array
+    manager.wallet = await getNewWallet(seed)
+
+    const primaryKeypair = manager.wallet.extractByTags(['#primary'])[0] // array of uint8array
+    // get keys
+    const keypair = {
+      publicKey: primaryKeypair.publicKey,
+      secretKey: primaryKeypair.privateKey
     }
-    return operation
+
+    // HyPNS
+    const didInstance = await manager.hypnsNode.open({ keypair })
+    await didInstance.ready()
+
+    if (didInstance.latest && didInstance.latest.didDoc) {
+      return didInstance.latest.didDoc
+    }
+
+    const didDoc = walletToDIDDoc(manager.wallet)
+
+    didInstance.publish({ didDoc })
+
+    await getServiceInstance(deviceName)
+
+    console.log({ si2: manager.serviceInstance }) // hex
+    console.log({ siPK: manager.serviceInstance.key }) // hex
+
+    const did = `did:hypns:${didInstance.key}`
+
+    // add service endpoint to DiDDoc
+    const item = {
+      id: `${did}#peerpiper-merkle-root`,
+      type: 'LinkedDomains',
+      serviceEndpoint: `hypns://${manager.serviceInstance.key}`
+    }
+    didDoc.service
+      ? didDoc.service.push(item)
+      : (didDoc.service = [item])
+
+    didInstance.publish({ didDoc })
+
+    return didDoc
   }
 
-  const getCreatePayload = async (didDocumentModel, primaryKey) => {
-    // Create the encoded protected header.
-    const header = {
-      operation: 'create',
-      kid: '#primary',
-      alg: 'ES256K'
+  const getServiceInstance = async (deviceName) => {
+    // Add a data service
+    const serviceSeed = await manager.hypnsNode.getDeviceSeed(
+      deviceName + '.' + SERVICE + '.' + SERVICE_INDEX
+    ) // uint8array
+    const serviceKeyPair = await manager.hypnsNode.getKeypair(serviceSeed)
+
+    console.log({ serviceKeyPair }) // uint8array
+
+    const keypair = {
+      publicKey: bufferToHex(serviceKeyPair.publicKey),
+      secretKey: bufferToHex(serviceKeyPair.secretKey)
     }
-    return await makeSignedOperation(header, didDocumentModel, primaryKey.privateKey)
+
+    console.log({ keypair }) // hex
+
+    manager.serviceInstance = await manager.hypnsNode.open({ keypair })
+    await manager.serviceInstance.ready()
+    console.log({ si1: manager.serviceInstance }) // hex
+
+    // save this keypair to the wallet
+    manager.wallet.addKey({
+      type: 'assymetric',
+      encoding: 'hex',
+      publicKey: manager.serviceInstance._keypair.publicKey,
+      privateKey: manager.serviceInstance._keypair.secretKey,
+      didPublicKeyEncoding: 'publicKeyHex',
+      tags: ['#service']
+    })
+
+    // retreive
+    // const svcKeypair = manager.wallet.extractByTags(['#service'])[0] // array of uint8array
+    // the keys
+    // const kp = {
+    //   publicKey: svcKeypair.publicKey,
+    //   secretKey: svcKeypair.privateKey
+    // }
+    // return manager.serviceInstance
+  }
+  const keysFromSeed = async (seed) => {
+    return await didCrypto.ed25519.createKeys(seed) // Uint8Array
   }
 
-  const getUpdatePayload = async (
-    previousOperation,
-    oldDidDocument,
-    newDidDocument,
-    primaryPrivateKey
-  ) => {
-    const patches = jsonpatch.compare(oldDidDocument, newDidDocument)
-    const payload = {
-      didUniqueSuffix: previousOperation.didUniqueSuffix,
-      previousOperationHash: previousOperation.operation.operationHash,
-      patches: [
-        {
-          action: 'ietf-json-patch',
-          patches
-        }
-      ]
-    }
-    const header = {
-      operation: 'update',
-      kid: `${didMethodName}:${previousOperation.didUniqueSuffix}#primary`,
-      alg: 'ES256K'
-    }
-    return await makeSignedOperation(header, payload, primaryPrivateKey)
+  const getNewWallet = async (seed = '') => {
+    const primaryKey = await keysFromSeed(seed) // Uint8Array
+
+    console.log('getNewWallet', { primaryKey })
+
+    const recoveryKey = await didCrypto.ed25519.createKeys() // Uint8Array
+
+    const x25519Key = didCrypto.ed25519.X25519KeyPair({
+      publicKey: primaryKey.publicKey, // Uint8Array
+      secretKey: primaryKey.secretKey // Uint8Array
+    })
+
+    const wall = DIDWallet.create()
+
+    const notes = 'generated in did Manager.'
+
+    wall.addKey({
+      type: 'assymetric',
+      encoding: 'hex',
+      publicKey: bufferToHex(primaryKey.publicKey),
+      privateKey: bufferToHex(primaryKey.secretKey),
+      didPublicKeyEncoding: 'publicKeyHex',
+      tags: ['Ed25519VerificationKey2018', '#primary'],
+      notes
+    })
+
+    wall.addKey({
+      type: 'assymetric',
+      encoding: 'hex',
+      publicKey: bufferToHex(recoveryKey.publicKey),
+      privateKey: bufferToHex(recoveryKey.secretKey),
+      didPublicKeyEncoding: 'publicKeyHex',
+      tags: ['Ed25519VerificationKey2018', '#recovery'],
+      notes
+    })
+
+    wall.addKey({
+      type: 'assymetric',
+      encoding: 'hex',
+      didPublicKeyEncoding: 'publicKeyHex',
+      publicKey: bufferToHex(x25519Key.publicKey),
+      privateKey: bufferToHex(x25519Key.secretKey),
+      tags: ['X25519KeyAgreementKey2019', '#keyAgreement'],
+      notes
+    })
+
+    // wall.addKey({
+    //   type: 'assymetric',
+    //   encoding: 'jwk',
+    //   publicKey: JSON.stringify(secp256k1LinkedDataKey.publicKeyJwk),
+    //   privateKey: JSON.stringify(secp256k1LinkedDataKey.privateKeyJwk),
+    //   didPublicKeyEncoding: 'publicKeyJwk',
+    //   tags: [
+    //     'EcdsaSecp256k1VerificationKey2019',
+    //     `#${secp256k1LinkedDataKey.publicKeyJwk.kid}`
+    //   ],
+    //   notes
+    // })
+
+    return wall
   }
 
-  const getUpdatePayloadForAddingAKey = async (
-    previousOperation,
-    newPublicKey,
-    primaryPrivateKey
-  ) => {
-    const payload = {
-      didUniqueSuffix: previousOperation.didUniqueSuffix,
-      previousOperationHash: previousOperation.operation.operationHash,
-      patches: [
-        {
-          action: 'add-public-keys',
-          publicKeys: [newPublicKey]
-        }
-      ]
-    }
-    const header = {
-      operation: 'update',
-      kid: `${didMethodName}:${previousOperation.didUniqueSuffix}#primary`,
-      alg: 'ES256K'
-    }
-    return await makeSignedOperation(header, payload, primaryPrivateKey)
-  }
-
-  const getUpdatePayloadForRemovingAKey = async (
-    previousOperation,
-    kid,
-    primaryPrivateKey
-  ) => {
-    const payload = {
-      didUniqueSuffix: previousOperation.didUniqueSuffix,
-      previousOperationHash: previousOperation.operation.operationHash,
-      patches: [
-        {
-          action: 'remove-public-keys',
-          publicKeys: [kid]
-        }
-      ]
-    }
-    const header = {
-      operation: 'update',
-      kid: `${didMethodName}:${previousOperation.didUniqueSuffix}#primary`,
-      alg: 'ES256K'
-    }
-    return await makeSignedOperation(header, payload, primaryPrivateKey)
-  }
-
-  const getRecoverPayload = async (
-    didUniqueSuffix,
-    newDidDocument,
-    recoveryPrivateKey
-  ) => {
-    const payload = {
-      didUniqueSuffix,
-      newDidDocument
-    }
-    const header = {
-      operation: 'recover',
-      kid: `${didMethodName}:${didUniqueSuffix}#recovery`,
-      alg: 'ES256K'
-    }
-    return await makeSignedOperation(header, payload, recoveryPrivateKey)
-  }
-
-  const getDeletePayload = async (didUniqueSuffix, recoveryPrivateKey) => {
-    const header = {
-      operation: 'delete',
-      kid: `${didMethodName}:${didUniqueSuffix}#recovery`,
-      alg: 'ES256K'
-    }
-    const payload = { didUniqueSuffix }
-    return await makeSignedOperation(header, payload, recoveryPrivateKey)
-  }
-
-  const walletToInitialDIDDoc = wallet => {
+  const walletToDIDDoc = (wallet) => {
     const didDocumentModel = {
       '@context': [
         'https://www.w3.org/ns/did/v1'
@@ -167,7 +173,7 @@ const op = method => {
     const commonVerificationMethods = []
     const keyAgreementkeys = []
 
-    Object.values(wallet.keys).forEach(walletKey => {
+    Object.values(wallet.keys).forEach((walletKey) => {
       if (walletKey.type === 'assymetric') {
         if (walletKey.tags[0] === 'X25519KeyAgreementKey2019') {
           keyAgreementkeys.push({
@@ -186,16 +192,13 @@ const op = method => {
             })
           } else {
             publicKeys.push({
-              id:
-                walletKey.tags[1] !== undefined
-                  ? walletKey.tags[1]
-                  : `#${walletKey.kid}`,
+              id: walletKey.tags[1] !== undefined
+                ? walletKey.tags[1]
+                : `#${walletKey.kid}`,
               type: walletKey.tags[0],
-              usage:
-                walletKey.tags[1] &&
-                walletKey.tags[1].split('#').pop() === 'recovery'
-                  ? 'recovery'
-                  : 'signing',
+              usage: walletKey.tags[1] && walletKey.tags[1].split('#').pop() === 'recovery'
+                ? 'recovery'
+                : 'signing',
               [walletKey.didPublicKeyEncoding]: walletKey.publicKey
             })
           }
@@ -215,131 +218,11 @@ const op = method => {
     return didDocumentModel
   }
 
-  const addDIDToWallet = (did, wallet) => {
-    Object.values(wallet.keys).forEach(walletKey => {
-      if (walletKey.tags[1] === undefined) {
-        walletKey.tags.push(`#${walletKey.kid}`)
-      }
-      const fragment = walletKey.tags[1]
-      walletKey.tags.push(did + fragment)
-    })
-
-    return wallet
-  }
-
-  const getNewWallet = async () => {
-    const mnemonic = await MnemonicKeySystem.generateMnemonic()
-    const ed25519Key = await didCrypto.ed25519.createKeys()
-
-    const x25519Key = didCrypto.ed25519.X25519KeyPair.fromEdKeyPair({
-      publicKeyBase58: ed25519Key.publicKeyBase58,
-      privateKeyBase58: ed25519Key.privateKeyBase58
-    })
-
-    console.log({ x25519Key })
-
-    const wall = DIDWallet.create()
-
-    const notes = 'generated in did Manager.'
-
-    wall.addKey({
-      type: 'mnemonic',
-      encoding: 'bip39',
-      mnemonic,
-      tags: ['BIP39 Mnemonic'],
-      notes
-    })
-
-    const mks = new MnemonicKeySystem(mnemonic)
-    const primaryKey = mks.getKeyForPurpose('primary', 0)
-    const recoveryKey = mks.getKeyForPurpose('recovery', 0)
-
-    // convert hex to jwk, so JOSE is easy....
-    const secp256k1LinkedDataKey = {
-      // id: 'did:example:123#WqzaOweASs78whhl_YvCEvj1nd89IycryVlmZMefcjU',
-      // type: 'EcdsaSecp256k1VerificationKey2019',
-      // controller: 'did:example:123',
-      publicKeyJwk: await ES256K.keyUtils.publicJWKFromPublicKeyHex(
-        primaryKey.publicKey
-      ),
-      privateKeyJwk: await ES256K.keyUtils.privateJWKFromPrivateKeyHex(
-        primaryKey.privateKey
-      )
-    }
-
-    wall.addKey({
-      type: 'assymetric',
-      encoding: 'jwk',
-      publicKey: JSON.stringify(secp256k1LinkedDataKey.publicKeyJwk),
-      privateKey: JSON.stringify(secp256k1LinkedDataKey.privateKeyJwk),
-      didPublicKeyEncoding: 'publicKeyJwk',
-      tags: [
-        'EcdsaSecp256k1VerificationKey2019',
-        `#${secp256k1LinkedDataKey.publicKeyJwk.kid}`
-      ],
-      notes
-    })
-
-    wall.addKey({
-      type: 'assymetric',
-      encoding: 'hex',
-      ...primaryKey,
-      didPublicKeyEncoding: 'publicKeyHex',
-      tags: ['EcdsaSecp256k1VerificationKey2019', '#primary'],
-      notes
-    })
-
-    wall.addKey({
-      type: 'assymetric',
-      encoding: 'hex',
-      ...recoveryKey,
-      didPublicKeyEncoding: 'publicKeyHex',
-      tags: ['EcdsaSecp256k1VerificationKey2019', '#recovery'],
-      notes
-    })
-
-    wall.addKey({
-      type: 'assymetric',
-      encoding: 'base58',
-      didPublicKeyEncoding: 'publicKeyBase58',
-      publicKey: ed25519Key.publicKeyBase58,
-      privateKey: ed25519Key.privateKeyBase58,
-      tags: ['Ed25519VerificationKey2018'],
-      notes
-    })
-
-    wall.addKey({
-      type: 'assymetric',
-      encoding: 'hex',
-      didPublicKeyEncoding: 'publicKeyHex',
-      publicKey: x25519Key.publicKeyBuffer.toString('hex'),
-      privateKey: x25519Key.privateKeyBuffer.toString('hex'),
-      tags: ['X25519KeyAgreementKey2019', '#keyAgreement'],
-      notes
-    })
-
-    const didDocumentModel = walletToInitialDIDDoc(wall)
-    const createPayload = await getCreatePayload(didDocumentModel, primaryKey)
-    const didUniqueSuffix = getDidUniqueSuffix(createPayload)
-
-    const predictedDID = `${didMethodName}:${didUniqueSuffix}`
-
-    addDIDToWallet(predictedDID, wall)
-
-    return wall
-  }
   return {
-    getDidDocumentModel,
-    makeSignedOperation,
-    getCreatePayload,
-    getUpdatePayload,
-    getUpdatePayloadForAddingAKey,
-    getUpdatePayloadForRemovingAKey,
-    getRecoverPayload,
-    getDeletePayload,
     getNewWallet,
-    walletToInitialDIDDoc
+    walletToDIDDoc,
+    keysFromSeed,
+    getDidDoc,
+    getServiceInstance
   }
 }
-
-export default op

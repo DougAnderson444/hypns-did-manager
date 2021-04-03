@@ -1,10 +1,6 @@
-import * as hypnsLib from 'js-did-hypns'
-
 import op from './op/index.js'
-import * as func from './func/index.js'
-import MKS from './crypto/MnemonicKeySystem.js'
 
-export class DIDManager {
+class Manager {
   constructor ({ db, storage, parameters, hypnsNode, opts } = {}) {
     if (!parameters) {
       throw new Error('parameters is missing')
@@ -21,20 +17,24 @@ export class DIDManager {
     this.parameters = parameters
     this.hypnsNode = hypnsNode
 
+    // this.didHypns = didHypns(hypnsNode)
+
     this.op = op(this)
-    this.func = func
 
     // Resolver
     // this.resolve = resolve(this)
+
     const resolverOpts = {}
     if (hypnsNode) resolverOpts.hypnsNode = hypnsNode
 
-    const resolver = hypnsLib.getResolver(resolverOpts)
-    this.resolve = resolver.hypns
+    // const resolver = hypnsLib.getResolver(resolverOpts)
+    // this.resolve = resolver.hypns
 
     // Sync (profiles across devices)
     // this.sync = sync(this)
   }
 }
 
-export const MnemonicKeySystem = MKS
+export const DIDManager = (opts) => {
+  return new Manager(opts)
+}
