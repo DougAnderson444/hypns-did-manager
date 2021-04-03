@@ -103,8 +103,6 @@ export default (manager) => {
   const getNewWallet = async (seed = '') => {
     const primaryKey = await keysFromSeed(seed) // Uint8Array
 
-    console.log('getNewWallet', { primaryKey })
-
     const recoveryKey = await didCrypto.ed25519.createKeys() // Uint8Array
 
     const x25519Key = didCrypto.ed25519.X25519KeyPair({
