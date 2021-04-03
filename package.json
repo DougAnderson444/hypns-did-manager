@@ -1,6 +1,6 @@
 {
   "name": "hypns-did-manager",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Manage those DIDs",
   "main": "src/index.js",
   "scripts": {
