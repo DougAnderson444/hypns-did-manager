@@ -37,9 +37,6 @@ export default (manager) => {
 
     await getServiceInstance(deviceName)
 
-    console.log({ si2: manager.serviceInstance }) // hex
-    console.log({ siPK: manager.serviceInstance.key }) // hex
-
     const did = `did:hypns:${didInstance.key}`
 
     // add service endpoint to DiDDoc
@@ -62,20 +59,15 @@ export default (manager) => {
     const serviceSeed = await manager.hypnsNode.getDeviceSeed(
       deviceName + '.' + SERVICE + '.' + SERVICE_INDEX
     ) // uint8array
-    const serviceKeyPair = await manager.hypnsNode.getKeypair(serviceSeed)
+    const serviceKeyPair = await manager.hypnsNode.getKeypair(serviceSeed) // uint8array
 
-    console.log({ serviceKeyPair }) // uint8array
-
-    const keypair = {
+    const keypair = { // hex
       publicKey: bufferToHex(serviceKeyPair.publicKey),
       secretKey: bufferToHex(serviceKeyPair.secretKey)
     }
 
-    console.log({ keypair }) // hex
-
     manager.serviceInstance = await manager.hypnsNode.open({ keypair })
     await manager.serviceInstance.ready()
-    console.log({ si1: manager.serviceInstance }) // hex
 
     // save this keypair to the wallet
     manager.wallet.addKey({
