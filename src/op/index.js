@@ -12,20 +12,51 @@ function bufferToHex (buffer) {
 export default (manager) => {
   // const { didMethodName } = manager.parameters
 
-  const getDidDoc = async (deviceName) => {
-    const seed = await manager.hypnsNode.getDeviceSeed(deviceName) // uint8array
-    manager.wallet = await getNewWallet(seed)
-
-    const primaryKeypair = manager.wallet.extractByTags(['#primary'])[0] // array of uint8array
+  const getKeypairByTag = (tag) => { // ex: '#primary' or '#root
+    const tagKeypair = manager.wallet.extractByTags([tag])[0] // array of uint8array
     // get keys
     const keypair = {
-      publicKey: primaryKeypair.publicKey,
-      secretKey: primaryKeypair.privateKey
+      publicKey: tagKeypair.publicKey,
+      secretKey: tagKeypair.privateKey
     }
+    return { keypair }
+  }
+  const createKeypairFromDeviceName = async (deviceName, tag) => {
+    const seed = await manager.hypnsNode.getDeviceSeed(deviceName) // uint8array
+    manager.wallet = await createWallet(seed)
 
-    // HyPNS
+    const keypair = getKeypairByTag(tag)
+
+    return keypair
+  }
+
+  const getDidFromKeypair = async (keypair) => {
     const didInstance = await manager.hypnsNode.open({ keypair })
     await didInstance.ready()
+    const did = `did:hypns:${didInstance.key}`
+    return { did, didInstance }
+  }
+
+  const getDidInstance = async (deviceName) => {
+    const tag = '#root'
+    let rootKeypair
+    if (!manager.wallet) {
+      rootKeypair = createKeypairFromDeviceName(deviceName, tag)
+    } else {
+      rootKeypair = getKeypairByTag(tag)
+    }
+
+    const { did, didInstance } = await getDidFromKeypair(rootKeypair)
+    return { did, didInstance }
+  }
+
+  const getDid = async (deviceName) => {
+    const { did } = await getDidInstance(deviceName)
+    return did
+  }
+
+  const getDidDoc = async (deviceName) => {
+    const { did, didInstance } = await getDidInstance(deviceName)
 
     if (didInstance.latest && didInstance.latest.didDoc) {
       return didInstance.latest.didDoc
@@ -36,8 +67,6 @@ export default (manager) => {
     didInstance.publish({ didDoc })
 
     await getServiceInstance(deviceName)
-
-    const did = `did:hypns:${didInstance.key}`
 
     // add service endpoint to DiDDoc
     const item = {
@@ -92,7 +121,7 @@ export default (manager) => {
     return await didCrypto.ed25519.createKeys(seed) // Uint8Array
   }
 
-  const getNewWallet = async (seed = '') => {
+  const createWallet = async (seed = '') => {
     const primaryKey = await keysFromSeed(seed) // Uint8Array
 
     const recoveryKey = await didCrypto.ed25519.createKeys() // Uint8Array
@@ -105,6 +134,20 @@ export default (manager) => {
     const wall = DIDWallet.create()
 
     const notes = 'generated in did Manager.'
+
+    /**
+    * Initially, root key = primary key. But the primary key can eventually be rotated.
+    * Root key stays the same, it's public key is used as the DID when there's a DID
+    */
+    wall.addKey({
+      type: 'assymetric',
+      encoding: 'hex',
+      publicKey: bufferToHex(primaryKey.publicKey),
+      privateKey: bufferToHex(primaryKey.secretKey),
+      didPublicKeyEncoding: 'publicKeyHex',
+      tags: ['Ed25519VerificationKey2018', '#root'],
+      notes
+    })
 
     wall.addKey({
       type: 'assymetric',
@@ -209,9 +252,10 @@ export default (manager) => {
   }
 
   return {
-    getNewWallet,
+    createWallet,
     walletToDIDDoc,
     keysFromSeed,
+    getDid,
     getDidDoc,
     getServiceInstance
   }
